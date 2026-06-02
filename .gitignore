@@ -1,0 +1,32 @@
+# The directory Mix will write compiled artifacts to.
+/_build/
+
+# The directory Mix downloads your dependencies sources to.
+/deps/
+
+# Compiled BEAM bytecode and archive artifacts.
+*.beam
+*.ez
+
+# Package tarball built via "mix hex.build".
+excache-*.tar
+
+# If you run "mix test --cover", coverage assets end up here.
+/cover/
+
+# Where third-party dependencies like ExDoc output generated docs.
+/doc/
+
+# ElixirLS language server workspace.
+.elixir_ls/
+
+# If the VM crashes, it generates a dump, let's ignore it too.
+erl_crash.dump
+
+# Runtime scratch space (AOF log and snapshot dumps written by tests).
+/tmp/
+
+# OS, log, and local environment files.
+.DS_Store
+*.log
+.env
