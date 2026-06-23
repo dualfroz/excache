@@ -1,8 +1,9 @@
 defmodule Excache.Command do
   @moduledoc false
 
-  alias Excache.{PubSub, Store, Persistence, Aof, Notify}
+  alias Excache.{Blocking, PubSub, Store, Persistence, Aof, Notify}
   alias Excache.Command.{Reply, Transaction}
+  alias Excache.Eviction.Runner
 
   import Reply,
     only: [
@@ -45,9 +46,24 @@ defmodule Excache.Command do
     ZADD ZREM ZINCRBY ZPOPMIN ZPOPMAX
   )
 
+  @oomDenied ~w(
+    SET SETNX SETRANGE APPEND GETSET MSET INCR INCRBY DECR DECRBY INCRBYFLOAT
+    LPUSH RPUSH LINSERT LSET RPOPLPUSH BLMOVE BRPOPLPUSH
+    HSET HSETNX HINCRBY
+    SADD SMOVE SINTERSTORE SUNIONSTORE SDIFFSTORE
+    ZADD ZINCRBY
+    XADD XSETID XGROUP XREADGROUP XCLAIM XAUTOCLAIM
+    SETBIT BITOP BITFIELD PFADD PFMERGE
+    COPY RENAME RENAMENX
+  )
+
+  @oom {:error, "OOM command not allowed when used memory > 'maxmemory'"}
+
   def known_commands, do: @known ++ Excache.Command.Extended.command_names()
 
   @extended_write Excache.Command.Extended.write_command_names()
+
+  @blockingNames Excache.Command.Blocking.commandNames()
 
   def execute([], state), do: {[], state}
 
@@ -61,27 +77,76 @@ defmodule Excache.Command do
   end
 
   def dispatch_and_log(command, args, state) do
-    {replies, updated} = dispatch(command, args, state)
-
-    if writeCommand?(command) and not Enum.any?(replies, &match?({:error, _}, &1)) do
-      Aof.append(command, aofArgs(command, args, replies))
-      Notify.for_command(command, args)
+    if oomDenied?(command) and Runner.admit() == :oom do
+      {[@oom], state}
+    else
+      logged(command, args, state)
     end
+  end
+
+  defp logged(command, args, state) do
+    {replies, updated} = dispatch(command, args, state)
+    succeeded = not Enum.any?(replies, &match?({:error, _}, &1))
+
+    if succeeded and oomDenied?(command), do: Runner.account(args)
+
+    entries = if succeeded, do: aofEntries(command, args, replies), else: []
+    logWrites(entries)
+    logWrites(servedWrites(command, wakeKeys(entries)))
 
     {replies, updated}
   end
 
+  defp logWrites(entries) do
+    Enum.each(entries, fn {name, args} ->
+      if writeCommand?(name) do
+        Aof.append(name, args)
+        Notify.for_command(name, args)
+      end
+    end)
+  end
+
+  defp servedWrites(command, keys) do
+    if command in @blockingNames, do: Blocking.takeWrites(), else: Blocking.signal(keys)
+  end
+
+  defp wakeKeys(entries), do: Enum.flat_map(entries, &listTargets/1)
+
+  defp listTargets({"LPUSH", [key | _values]}), do: [key]
+  defp listTargets({"RPUSH", [key | _values]}), do: [key]
+  defp listTargets({"LINSERT", [key | _rest]}), do: [key]
+  defp listTargets({"RPOPLPUSH", [_source, destination]}), do: [destination]
+  defp listTargets({"RENAME", [_source, destination]}), do: [destination]
+  defp listTargets({"RENAMENX", [_source, destination]}), do: [destination]
+  defp listTargets({"COPY", [_source, destination | _options]}), do: [destination]
+  defp listTargets(_entry), do: []
+
   defp writeCommand?(command), do: command in @write_commands or command in @extended_write
 
-  defp aofArgs("XADD", args, [{:bulk, id}]) when is_binary(id),
-    do: Excache.Command.Streams.rewriteAddId(args, id)
+  defp oomDenied?(command), do: command in @oomDenied
 
-  defp aofArgs(_command, args, _replies), do: args
+  defp aofEntries("XADD", args, [{:bulk, id}]) when is_binary(id),
+    do: [{"XADD", Excache.Command.Streams.rewriteAddId(args, id)}]
+
+  defp aofEntries("SPOP", [key | _rest] = args, replies) do
+    case poppedMembers(replies) do
+      [] -> [{"SPOP", args}]
+      members -> [{"SREM", [key | members]}]
+    end
+  end
+
+  defp aofEntries(command, args, _replies), do: [{command, args}]
+
+  defp poppedMembers([{:bulk, member}]) when is_binary(member), do: [member]
+
+  defp poppedMembers([{:array, entries}]),
+    do: for({:bulk, member} <- entries, is_binary(member), do: member)
+
+  defp poppedMembers(_replies), do: []
 
   defp dispatch("PING", [], state), do: {[{:simple, "PONG"}], state}
   defp dispatch("PING", [message], state), do: {[{:bulk, message}], state}
   defp dispatch("ECHO", [message], state), do: {[{:bulk, message}], state}
-  defp dispatch("COMMAND", _args, state), do: {[{:array, []}], state}
   defp dispatch("SELECT", [_db], state), do: {[{:simple, "OK"}], state}
   defp dispatch("QUIT", [], state), do: {[{:simple, "OK"}], state}
   defp dispatch("DBSIZE", [], state), do: {[{:integer, Store.dbsize()}], state}
@@ -287,13 +352,15 @@ defmodule Excache.Command do
     end
   end
 
-  defp dispatch("ZPOPMIN", [key], state), do: reply(zrange_reply(Store.zpopmin(key, 1), true), state)
+  defp dispatch("ZPOPMIN", [key], state),
+    do: reply(zrange_reply(Store.zpopmin(key, 1), true), state)
 
   defp dispatch("ZPOPMIN", [key, count], state) do
     with_int(count, state, fn n -> zrange_reply(Store.zpopmin(key, n), true) end)
   end
 
-  defp dispatch("ZPOPMAX", [key], state), do: reply(zrange_reply(Store.zpopmax(key, 1), true), state)
+  defp dispatch("ZPOPMAX", [key], state),
+    do: reply(zrange_reply(Store.zpopmax(key, 1), true), state)
 
   defp dispatch("ZPOPMAX", [key, count], state) do
     with_int(count, state, fn n -> zrange_reply(Store.zpopmax(key, n), true) end)

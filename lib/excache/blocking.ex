@@ -155,3 +155,126 @@ defmodule Excache.Blocking do
     end
   end
 
+  defp serve({:move, fromSide, toSide, destination}, key) do
+    case popOne(key, fromSide) do
+      {:ok, value} ->
+        moveInto(key, destination, fromSide, toSide, value)
+
+      nil ->
+        :empty
+
+      {:error, reason} ->
+        {:error, errorTerm(reason)}
+    end
+  end
+
+  defp moveInto(source, destination, fromSide, toSide, value) do
+    case pushOne(destination, toSide, value) do
+      {:ok, _length} ->
+        {:ok, {:bulk, value}, [destination],
+         moveWrites(source, destination, fromSide, toSide, value)}
+
+      {:error, reason} ->
+        pushOne(source, fromSide, value)
+        {:error, errorTerm(reason)}
+    end
+  end
+
+  defp popOne(key, :left), do: Store.lpop(key, nil)
+  defp popOne(key, :right), do: Store.rpop(key, nil)
+
+  defp popMany(key, :left, count), do: Store.lpop(key, count)
+  defp popMany(key, :right, count), do: Store.rpop(key, count)
+
+  defp pushOne(key, :left, value), do: Store.lpush(key, [value])
+  defp pushOne(key, :right, value), do: Store.rpush(key, [value])
+
+  defp popName(:left), do: "LPOP"
+  defp popName(:right), do: "RPOP"
+
+  defp pushName(:left), do: "LPUSH"
+  defp pushName(:right), do: "RPUSH"
+
+  defp moveWrites(source, destination, :right, :left, _value),
+    do: [{"RPOPLPUSH", [source, destination]}]
+
+  defp moveWrites(source, destination, fromSide, toSide, value),
+    do: [{popName(fromSide), [source]}, {pushName(toSide), [destination, value]}]
+
+  defp missReply({:move, _fromSide, _toSide, _destination}), do: {:bulk, nil}
+  defp missReply(_op), do: {:array, nil}
+
+  defp errorTerm(:wrongtype), do: Reply.wrongtype()
+
+  defp deliver(served, inlineRef) do
+    Enum.reduce(served, nil, fn {waiter, term}, inline ->
+      if waiter.ref == inlineRef do
+        term
+      else
+        send(waiter.pid, {:excacheUnblocked, waiter.ref, term})
+        inline
+      end
+    end)
+  end
+
+  defp headWaiter(state, key) do
+    with {:ok, queue} <- Map.fetch(state.queues, key),
+         {:value, ref} <- :queue.peek(queue) do
+      Map.fetch!(state.waiters, ref)
+    else
+      _missing -> nil
+    end
+  end
+
+  defp enqueue(state, waiter) do
+    queues =
+      Enum.reduce(Enum.uniq(waiter.keys), state.queues, fn key, acc ->
+        Map.put(acc, key, :queue.in(waiter.ref, Map.get(acc, key, :queue.new())))
+      end)
+
+    %{state | queues: queues, waiters: Map.put(state.waiters, waiter.ref, waiter)}
+  end
+
+  defp dropWaiter(state, waiter) do
+    armed = Map.fetch!(state.waiters, waiter.ref)
+    if armed.monitor, do: Process.demonitor(armed.monitor, [:flush])
+    if armed.timer, do: Process.cancel_timer(armed.timer)
+
+    queues =
+      Enum.reduce(Enum.uniq(armed.keys), state.queues, fn key, acc ->
+        dropFromQueue(acc, key, armed.ref)
+      end)
+
+    %{
+      state
+      | queues: queues,
+        waiters: Map.delete(state.waiters, armed.ref),
+        monitors: Map.delete(state.monitors, armed.monitor)
+    }
+  end
+
+  defp dropFromQueue(queues, key, ref) do
+    pruned = :queue.filter(&(&1 != ref), Map.fetch!(queues, key))
+
+    if :queue.is_empty(pruned) do
+      Map.delete(queues, key)
+    else
+      Map.put(queues, key, pruned)
+    end
+  end
+
+  defp arm(state, waiter, timeout) do
+    monitor = Process.monitor(waiter.pid)
+
+    timer =
+      if timeout > 0, do: Process.send_after(self(), {:blockingTimeout, waiter.ref}, timeout)
+
+    armed = %{waiter | monitor: monitor, timer: timer}
+
+    %{
+      state
+      | waiters: Map.put(state.waiters, waiter.ref, armed),
+        monitors: Map.put(state.monitors, monitor, waiter.ref)
+    }
+  end
+end
