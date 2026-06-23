@@ -11,8 +11,12 @@ defmodule Excache.Application do
       {Registry, keys: :duplicate, name: Excache.PubSub.Registry},
       Excache.Store.Supervisor,
       Excache.Aof,
+      Excache.Blocking,
       Excache.Expiry,
-      {DynamicSupervisor, strategy: :one_for_one, name: Excache.Server.ConnectionSupervisor}
+      trackerSpec(),
+      Excache.Eviction.Runner,
+      {DynamicSupervisor, strategy: :one_for_one, name: Excache.Server.ConnectionSupervisor},
+      Excache.Clients
     ]
 
     case Supervisor.start_link(children, strategy: :one_for_one, name: Excache.Supervisor) do
@@ -23,6 +27,15 @@ defmodule Excache.Application do
       error ->
         error
     end
+  end
+
+  def trackerSpec do
+    {Excache.Eviction.Tracker,
+     [
+       name: Excache.Eviction.Tracker,
+       logFactor: Excache.Config.lfuLogFactor(),
+       decayTime: Excache.Config.lfuDecayTime()
+     ]}
   end
 
   defp start_acceptor(supervisor, port) when is_integer(port) do
