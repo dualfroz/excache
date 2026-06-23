@@ -2,6 +2,8 @@ defmodule Excache.Store do
   @moduledoc false
 
   alias Excache.{Bitmap, HyperLogLog}
+  alias Excache.Config
+  alias Excache.Eviction.Tracker
 
   def shard_count, do: Application.get_env(:excache, :shard_count, 8)
 
@@ -9,7 +11,21 @@ defmodule Excache.Store do
 
   defp shard_for(key), do: shard_name(rem(:erlang.phash2(key), shard_count()))
 
-  defp call_key(key, op), do: GenServer.call(shard_for(key), {:op, op})
+  defp call_key(key, op) do
+    trackAccess(key, op)
+    GenServer.call(shard_for(key), {:op, op})
+  end
+
+  defp trackAccess(_key, {:del, _target}), do: :ok
+  defp trackAccess(_key, {:peek, _target}), do: :ok
+
+  defp trackAccess(key, _op) do
+    if Config.tracksAccess?() do
+      Tracker.touchAsync(Tracker, key, System.system_time(:millisecond))
+    end
+
+    :ok
+  end
 
   defp fan_out(op) do
     for index <- 0..(shard_count() - 1) do
@@ -265,21 +281,35 @@ defmodule Excache.Store do
   def touch(keys), do: exists(keys)
 
   def hmget(key, fields) do
-    Enum.map(fields, fn field ->
+    collectPerField(fields, fn field ->
       case call_key(key, {:hget, key, field}) do
-        {:ok, value} -> value
-        _ -> nil
+        {:ok, value} -> {:ok, value}
+        nil -> {:ok, nil}
+        error -> error
       end
     end)
   end
 
   def smismember(key, members) do
-    Enum.map(members, fn member ->
+    collectPerField(members, fn member ->
       case call_key(key, {:sismember, key, member}) do
-        {:ok, 1} -> 1
-        _ -> 0
+        {:ok, present} -> {:ok, present}
+        error -> error
       end
     end)
+  end
+
+  defp collectPerField(entries, lookup) do
+    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+      case lookup.(entry) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> Enum.reverse(values)
+      error -> error
+    end
   end
 
   def sintercard(keys, limit) do
@@ -290,30 +320,64 @@ defmodule Excache.Store do
   end
 
   def smove(source, dest, member) do
-    case call_key(source, {:srem, source, [member]}) do
-      {:ok, 0} ->
-        {:ok, 0}
+    with :ok <- ensureKind(dest, "set") do
+      case call_key(source, {:srem, source, [member]}) do
+        {:ok, 0} ->
+          {:ok, 0}
 
-      {:ok, _} ->
-        call_key(dest, {:sadd, dest, [member]})
-        {:ok, 1}
+        {:ok, _removed} ->
+          case call_key(dest, {:sadd, dest, [member]}) do
+            {:ok, _added} ->
+              {:ok, 1}
 
-      error ->
-        error
+            error ->
+              call_key(source, {:sadd, source, [member]})
+              error
+          end
+
+        error ->
+          error
+      end
     end
   end
 
   def rpoplpush(source, dest) do
-    case call_key(source, {:rpop, source, nil}) do
-      {:ok, value} ->
-        call_key(dest, {:lpush, dest, [value]})
-        {:ok, value}
+    with :ok <- ensureKind(dest, "list") do
+      case call_key(source, {:rpop, source, nil}) do
+        {:ok, value} ->
+          case call_key(dest, {:lpush, dest, [value]}) do
+            {:ok, _length} ->
+              {:ok, value}
 
-      nil ->
-        {:ok, nil}
+            error ->
+              call_key(source, {:rpush, source, [value]})
+              error
+          end
 
-      error ->
-        error
+        nil ->
+          {:ok, nil}
+
+        error ->
+          error
+      end
+    end
+  end
+
+  defp ensureKind(key, expected) do
+    case call_key(key, {:type, key}) do
+      "none" -> :ok
+      ^expected -> :ok
+      _ -> {:error, :wrongtype}
+    end
+  end
+
+  defp putEntry(dest, {kind, value, ea}),
+    do: call_key(dest, {:extra, {:raw_put, dest, kind, value, ea}})
+
+  def rename(key, key) do
+    case call_key(key, {:exists, key}) do
+      1 -> {:ok, "OK"}
+      0 -> {:error, :nokey}
     end
   end
 
@@ -322,10 +386,13 @@ defmodule Excache.Store do
       :miss ->
         {:error, :nokey}
 
-      {kind, value, ea} ->
-        call_key(dest, {:extra, {:raw_put, dest, kind, value, ea}})
-        call_key(source, {:del, source})
-        {:ok, "OK"}
+      entry ->
+        if putEntry(dest, entry) == 1 do
+          call_key(source, {:del, source})
+          {:ok, "OK"}
+        else
+          {:error, :nokey}
+        end
     end
   end
 
@@ -340,10 +407,12 @@ defmodule Excache.Store do
             {:ok, 0}
 
           0 ->
-            {kind, value, ea} = entry
-            call_key(dest, {:extra, {:raw_put, dest, kind, value, ea}})
-            call_key(source, {:del, source})
-            {:ok, 1}
+            if putEntry(dest, entry) == 1 do
+              call_key(source, {:del, source})
+              {:ok, 1}
+            else
+              {:error, :nokey}
+            end
         end
     end
   end
@@ -353,12 +422,11 @@ defmodule Excache.Store do
       :miss ->
         {:ok, 0}
 
-      {kind, value, ea} ->
+      entry ->
         if not replace and call_key(dest, {:exists, dest}) == 1 do
           {:ok, 0}
         else
-          call_key(dest, {:del, dest})
-          {:ok, call_key(dest, {:extra, {:raw_put, dest, kind, value, ea}})}
+          {:ok, putEntry(dest, entry)}
         end
     end
   end
