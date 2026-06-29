@@ -157,3 +157,124 @@ defmodule Excache.Command.Server do
     end
   end
 
+  defp headline(%{stats: stats, policy: policy, limit: limit}) do
+    limitText = if limit == 0, do: "no limit", else: "#{limit} byte limit"
+
+    "#{stats.keys} keys, #{stats.usedMemory} bytes used, #{limitText}, " <>
+      "maxmemory-policy #{Eviction.policyName(policy)}."
+  end
+
+  defp findings(report) do
+    [
+      &noLimit/1,
+      &overLimit/1,
+      &nearLimit/1,
+      &noVolatileKeys/1,
+      &dominantKey/1,
+      &overheadHeavy/1,
+      &untrackedKeys/1,
+      &evictionActivity/1,
+      &refusedWrites/1
+    ]
+    |> Enum.map(& &1.(report))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp noLimit(%{limit: 0, stats: stats}) do
+    "maxmemory is not set, so nothing bounds the keyspace; it already holds " <>
+      "#{stats.usedMemory} bytes and will keep growing until the host runs out."
+  end
+
+  defp noLimit(_report), do: nil
+
+  defp overLimit(%{limit: limit, stats: stats, policy: :noeviction}) when limit > 0 do
+    if stats.usedMemory > limit do
+      "used memory #{stats.usedMemory} is over the #{limit} byte limit and " <>
+        "maxmemory-policy is noeviction, so every command that allocates is being refused."
+    end
+  end
+
+  defp overLimit(%{limit: limit, stats: stats}) when limit > 0 do
+    if stats.usedMemory > limit do
+      "used memory #{stats.usedMemory} is over the #{limit} byte limit, " <>
+        "the next write will free keys."
+    end
+  end
+
+  defp overLimit(_report), do: nil
+
+  defp nearLimit(%{limit: limit, stats: stats}) when limit > 0 do
+    share = percent(stats.usedMemory, limit)
+
+    if share >= @doctorNearLimit and stats.usedMemory <= limit do
+      "used memory is #{share} percent of the #{limit} byte limit, eviction is close."
+    end
+  end
+
+  defp nearLimit(_report), do: nil
+
+  defp noVolatileKeys(%{policy: policy, stats: stats, limit: limit}) when limit > 0 do
+    if Eviction.volatile?(policy) and stats.volatileKeys == 0 do
+      "maxmemory-policy #{Eviction.policyName(policy)} only evicts keys with a TTL and " <>
+        "none of the #{stats.keys} keys has one, so eviction cannot free anything."
+    end
+  end
+
+  defp noVolatileKeys(_report), do: nil
+
+  defp dominantKey(%{stats: %{largestKey: {key, bytes}} = stats}) do
+    share = percent(bytes, stats.usedMemory)
+
+    if share >= @doctorHeavyKey and stats.keys > 1 do
+      "key '#{key}' holds #{bytes} bytes, #{share} percent of everything stored."
+    end
+  end
+
+  defp dominantKey(_report), do: nil
+
+  defp overheadHeavy(%{stats: stats}) do
+    share = percent(stats.overheadBytes, stats.usedMemory)
+
+    if share > 50 do
+      "per key overhead is #{share} percent of the total at #{stats.bytesPerKey} bytes per key, " <>
+        "the keyspace is dominated by very small values."
+    end
+  end
+
+  defp overheadHeavy(_report), do: nil
+
+  defp untrackedKeys(%{policy: policy, stats: stats, tracked: tracked}) do
+    if policy in [:allkeysLru, :allkeysLfu, :volatileLru, :volatileLfu] and tracked < stats.keys do
+      "access metadata covers #{tracked} of #{stats.keys} keys, " <>
+        "the keys nobody has read yet are the first to go."
+    end
+  end
+
+  defp untrackedKeys(_report), do: nil
+
+  defp evictionActivity(%{runner: %{evictedKeys: evicted}}) when evicted > 0,
+    do: "#{evicted} keys have been evicted since the last CONFIG RESETSTAT."
+
+  defp evictionActivity(_report), do: nil
+
+  defp refusedWrites(%{runner: %{oomRejections: rejected}}) when rejected > 0,
+    do: "#{rejected} commands hit the memory limit since the last CONFIG RESETSTAT."
+
+  defp refusedWrites(_report), do: nil
+
+  defp percent(_part, 0), do: 0
+  defp percent(part, whole), do: round(part * 100 / whole)
+
+  defp nonNegativeInteger?(raw) do
+    match?({value, ""} when value >= 0, Integer.parse(raw))
+  end
+
+  defp wrongArity(name),
+    do: {:error, "ERR wrong number of arguments for '#{name}' command"}
+
+  defp unknownSubcommand(command, subcommand) do
+    {:error,
+     "ERR Unknown subcommand or wrong number of arguments for '#{subcommand}'. " <>
+       "Try #{command} HELP."}
+  end
+end
