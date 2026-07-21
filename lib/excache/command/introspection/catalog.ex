@@ -151,3 +151,109 @@ defmodule Excache.Command.Introspection.Catalog do
     "UNWATCH" => {1, [:noscript, :loading, :stale, :fast], 0, 0, 0, :transactions}
   }
 
+  @keyRules %{
+    "XREAD" => :streams,
+    "XREADGROUP" => :streams,
+    "SINTERCARD" => {:numkeys, 1},
+    "BLMPOP" => {:numkeys, 2},
+    "OBJECT" => {:subcommand, ~w(ENCODING REFCOUNT FREQ IDLETIME)},
+    "MEMORY" => {:subcommand, ~w(USAGE)},
+    "XINFO" => {:subcommand, ~w(STREAM GROUPS CONSUMERS)},
+    "XGROUP" => {:subcommand, ~w(CREATE SETID DESTROY CREATECONSUMER DELCONSUMER)}
+  }
+
+  def tableNames, do: Map.keys(@commands)
+
+  def names, do: Excache.Command.known_commands() |> Enum.uniq() |> Enum.sort()
+
+  def known?(name), do: Map.has_key?(@commands, name)
+
+  def count, do: length(names())
+
+  def infoTerm(name) do
+    case Map.fetch(@commands, name) do
+      {:ok, {arity, flags, firstKey, lastKey, step, _group}} ->
+        {:array,
+         [
+           {:bulk, String.downcase(name)},
+           {:integer, arity},
+           {:array, Enum.map(flags, fn flag -> {:simple, Atom.to_string(flag)} end)},
+           {:integer, firstKey},
+           {:integer, lastKey},
+           {:integer, step}
+         ]}
+
+      :error ->
+        {:array, nil}
+    end
+  end
+
+  def docsTerm(name) do
+    {arity, _flags, _firstKey, _lastKey, _step, group} = Map.fetch!(@commands, name)
+
+    {:array,
+     [
+       {:bulk, "group"},
+       {:bulk, Atom.to_string(group)},
+       {:bulk, "arity"},
+       {:integer, arity}
+     ]}
+  end
+
+  def arityOk?(name, argc) do
+    {arity, _flags, _firstKey, _lastKey, _step, _group} = Map.fetch!(@commands, name)
+    if arity < 0, do: argc >= -arity, else: argc == arity
+  end
+
+  def keysFor(name, args) do
+    case Map.get(@keyRules, name) do
+      nil -> rangeKeys(name, args)
+      rule -> ruleKeys(rule, args)
+    end
+  end
+
+  defp rangeKeys(name, args) do
+    {_arity, _flags, firstKey, lastKey, step, _group} = Map.fetch!(@commands, name)
+
+    if firstKey == 0 do
+      {:ok, []}
+    else
+      count = length(args)
+      from = firstKey - 1
+      to = if lastKey < 0, do: count + lastKey, else: lastKey - 1
+
+      if to < from do
+        {:ok, []}
+      else
+        {:ok, args |> Enum.slice(from..to) |> Enum.take_every(step)}
+      end
+    end
+  end
+
+  defp ruleKeys(:streams, args) do
+    case Enum.find_index(args, fn arg -> String.upcase(arg) == "STREAMS" end) do
+      nil ->
+        :error
+
+      index ->
+        tail = Enum.drop(args, index + 1)
+        half = div(length(tail), 2)
+        if half == 0 or rem(length(tail), 2) == 1, do: :error, else: {:ok, Enum.take(tail, half)}
+    end
+  end
+
+  defp ruleKeys({:numkeys, position}, args) do
+    with {numkeys, ""} when numkeys > 0 <- Integer.parse(Enum.at(args, position - 1, "")),
+         keys when length(keys) == numkeys <- args |> Enum.drop(position) |> Enum.take(numkeys) do
+      {:ok, keys}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp ruleKeys({:subcommand, takesKey}, [subcommand, key | _rest]) do
+    if String.upcase(subcommand) in takesKey, do: {:ok, [key]}, else: {:ok, []}
+  end
+
+  defp ruleKeys({:subcommand, _takesKey}, _args), do: {:ok, []}
+end
