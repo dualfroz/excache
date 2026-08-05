@@ -55,6 +55,9 @@ defmodule Excache.Store.Ops.Binary do
       :wrongtype ->
         {:error, :wrongtype}
 
+      {:ok, current, _ea, _exists} when value == "" ->
+        {:ok, byte_size(current)}
+
       {:ok, current, ea, _exists} ->
         updated = overwrite(current, offset, value)
         store(table, key, updated, ea)
@@ -148,8 +151,6 @@ defmodule Excache.Store.Ops.Binary do
       if lower > upper, do: "", else: :binary.part(value, lower, upper - lower + 1)
     end
   end
-
-  defp overwrite(current, offset, value) when value == "", do: current
 
   defp overwrite(current, offset, value) do
     size = byte_size(current)

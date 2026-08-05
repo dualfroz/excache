@@ -313,21 +313,14 @@ defmodule Excache.Store.Ops.Extra do
     scanned =
       if rank < 0, do: Enum.reverse(indexed), else: indexed
 
-    skip = abs(rank) - 1
-    limit = if count == 0, do: :all, else: count
+    matches = collectMatches(scanned, element, abs(rank) - 1, matchLimit(count), maxlen, 0, [])
 
-    collectMatches(scanned, element, skip, limit, maxlen, 0, [])
-    |> then(fn matches ->
-      if count == nil do
-        case matches do
-          [] -> nil
-          [first | _] -> first
-        end
-      else
-        matches
-      end
-    end)
+    if count == nil, do: List.first(matches), else: matches
   end
+
+  defp matchLimit(nil), do: 1
+  defp matchLimit(0), do: :all
+  defp matchLimit(count), do: count
 
   defp collectMatches([], _element, _skip, _limit, _maxlen, _compared, acc),
     do: Enum.reverse(acc)
