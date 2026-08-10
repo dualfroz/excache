@@ -156,3 +156,162 @@ defmodule Excache.KeyspaceTest do
     assert left == ["y"]
   end
 
+  test "LREM counts from the tail for a negative count", %{conn: conn} do
+    assert {5, conn} = Client.command(conn, ["RPUSH", "log", "a", "b", "a", "c", "a"])
+    assert {2, conn} = Client.command(conn, ["LREM", "log", "-2", "a"])
+
+    {rest, conn} = Client.command(conn, ["LRANGE", "log", "0", "-1"])
+    assert rest == ["a", "b", "c"]
+
+    assert {1, conn} = Client.command(conn, ["LREM", "log", "0", "a"])
+    assert {0, conn} = Client.command(conn, ["LREM", "log", "3", "zz"])
+    assert {0, conn} = Client.command(conn, ["LREM", "absent", "0", "a"])
+
+    assert {{:error, "ERR value is not an integer or out of range"}, _conn} =
+             Client.command(conn, ["LREM", "log", "many", "a"])
+  end
+
+  test "LSET reports missing keys and out of range indexes", %{conn: conn} do
+    assert {{:error, "ERR no such key"}, conn} =
+             Client.command(conn, ["LSET", "nolist", "0", "v"])
+
+    assert {3, conn} = Client.command(conn, ["RPUSH", "items", "a", "b", "c"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["LSET", "items", "-1", "z"])
+
+    {items, conn} = Client.command(conn, ["LRANGE", "items", "0", "-1"])
+    assert items == ["a", "b", "z"]
+
+    assert {{:error, "ERR index out of range"}, conn} =
+             Client.command(conn, ["LSET", "items", "9", "v"])
+
+    assert {{:error, "ERR index out of range"}, _conn} =
+             Client.command(conn, ["LSET", "items", "-9", "v"])
+  end
+
+  test "LTRIM keeps an inclusive window and drops an empty list", %{conn: conn} do
+    assert {5, conn} = Client.command(conn, ["RPUSH", "queue", "a", "b", "c", "d", "e"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["LTRIM", "queue", "1", "-2"])
+
+    {kept, conn} = Client.command(conn, ["LRANGE", "queue", "0", "-1"])
+    assert kept == ["b", "c", "d"]
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["LTRIM", "queue", "5", "10"])
+    assert {0, conn} = Client.command(conn, ["EXISTS", "queue"])
+    assert {{:simple, "OK"}, _conn} = Client.command(conn, ["LTRIM", "absent", "0", "-1"])
+  end
+
+  test "LINSERT places an element around a pivot", %{conn: conn} do
+    assert {2, conn} = Client.command(conn, ["RPUSH", "plan", "one", "three"])
+    assert {3, conn} = Client.command(conn, ["LINSERT", "plan", "BEFORE", "three", "two"])
+    assert {4, conn} = Client.command(conn, ["LINSERT", "plan", "AFTER", "three", "four"])
+
+    {plan, conn} = Client.command(conn, ["LRANGE", "plan", "0", "-1"])
+    assert plan == ["one", "two", "three", "four"]
+
+    assert {-1, conn} = Client.command(conn, ["LINSERT", "plan", "BEFORE", "ghost", "x"])
+    assert {0, conn} = Client.command(conn, ["LINSERT", "absent", "BEFORE", "a", "b"])
+
+    assert {{:error, "ERR syntax error"}, _conn} =
+             Client.command(conn, ["LINSERT", "plan", "SIDEWAYS", "one", "x"])
+  end
+
+  test "RPOPLPUSH moves, rotates and protects the destination", %{conn: conn} do
+    assert {3, conn} = Client.command(conn, ["RPUSH", "source", "a", "b", "c"])
+    assert {"c", conn} = Client.command(conn, ["RPOPLPUSH", "source", "target"])
+
+    {target, conn} = Client.command(conn, ["LRANGE", "target", "0", "-1"])
+    assert target == ["c"]
+
+    assert {"b", conn} = Client.command(conn, ["RPOPLPUSH", "source", "source"])
+    {rotated, conn} = Client.command(conn, ["LRANGE", "source", "0", "-1"])
+    assert rotated == ["b", "a"]
+
+    assert {nil, conn} = Client.command(conn, ["RPOPLPUSH", "absent", "target"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "text", "v"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["RPOPLPUSH", "source", "text"])
+
+    {intact, _conn} = Client.command(conn, ["LRANGE", "source", "0", "-1"])
+    assert intact == ["b", "a"]
+  end
+
+  test "LPOS honours RANK, COUNT and MAXLEN", %{conn: conn} do
+    assert {8, conn} =
+             Client.command(conn, ["RPUSH", "mylist", "a", "b", "c", "1", "2", "3", "c", "c"])
+
+    assert {2, conn} = Client.command(conn, ["LPOS", "mylist", "c"])
+    assert {6, conn} = Client.command(conn, ["LPOS", "mylist", "c", "RANK", "2"])
+    assert {7, conn} = Client.command(conn, ["LPOS", "mylist", "c", "RANK", "-1"])
+    assert {6, conn} = Client.command(conn, ["LPOS", "mylist", "c", "RANK", "-2"])
+
+    {all, conn} = Client.command(conn, ["LPOS", "mylist", "c", "COUNT", "0"])
+    assert all == [2, 6, 7]
+
+    {two, conn} = Client.command(conn, ["LPOS", "mylist", "c", "COUNT", "2"])
+    assert two == [2, 6]
+
+    {backwards, conn} = Client.command(conn, ["LPOS", "mylist", "c", "RANK", "-1", "COUNT", "0"])
+    assert backwards == [7, 6, 2]
+
+    assert {nil, conn} = Client.command(conn, ["LPOS", "mylist", "ghost"])
+    {empty, conn} = Client.command(conn, ["LPOS", "mylist", "ghost", "COUNT", "0"])
+    assert empty == []
+
+    assert {nil, conn} = Client.command(conn, ["LPOS", "mylist", "c", "MAXLEN", "2"])
+    assert {2, conn} = Client.command(conn, ["LPOS", "mylist", "c", "MAXLEN", "3"])
+    assert {nil, conn} = Client.command(conn, ["LPOS", "absent", "c"])
+
+    assert {{:error, "ERR RANK can't be zero." <> _}, conn} =
+             Client.command(conn, ["LPOS", "mylist", "c", "RANK", "0"])
+
+    assert {{:error, "ERR COUNT can't be negative"}, conn} =
+             Client.command(conn, ["LPOS", "mylist", "c", "COUNT", "-1"])
+
+    assert {{:error, "ERR MAXLEN can't be negative"}, conn} =
+             Client.command(conn, ["LPOS", "mylist", "c", "MAXLEN", "-1"])
+
+    assert {{:error, "ERR syntax error"}, _conn} =
+             Client.command(conn, ["LPOS", "mylist", "c", "NEAR", "1"])
+  end
+
+  test "ZCOUNT handles exclusive and infinite bounds", %{conn: conn} do
+    assert {4, conn} =
+             Client.command(conn, ["ZADD", "prices", "10", "a", "20", "b", "30", "c", "40", "d"])
+
+    assert {4, conn} = Client.command(conn, ["ZCOUNT", "prices", "-inf", "+inf"])
+    assert {3, conn} = Client.command(conn, ["ZCOUNT", "prices", "20", "40"])
+    assert {2, conn} = Client.command(conn, ["ZCOUNT", "prices", "(20", "40"])
+    assert {1, conn} = Client.command(conn, ["ZCOUNT", "prices", "(20", "(40"])
+    assert {2, conn} = Client.command(conn, ["ZCOUNT", "prices", "-inf", "20"])
+    assert {0, conn} = Client.command(conn, ["ZCOUNT", "absent", "-inf", "+inf"])
+
+    assert {{:error, "ERR min or max is not a float"}, _conn} =
+             Client.command(conn, ["ZCOUNT", "prices", "abc", "10"])
+  end
+
+  test "ZREVRANGE, ZREVRANK and ZMSCORE", %{conn: conn} do
+    assert {3, conn} = Client.command(conn, ["ZADD", "board", "1", "a", "2", "b", "3.5", "c"])
+
+    {desc, conn} = Client.command(conn, ["ZREVRANGE", "board", "0", "-1"])
+    assert desc == ["c", "b", "a"]
+
+    {top, conn} = Client.command(conn, ["ZREVRANGE", "board", "0", "0"])
+    assert top == ["c"]
+
+    {tail, conn} = Client.command(conn, ["ZREVRANGE", "board", "-2", "-1"])
+    assert tail == ["b", "a"]
+
+    {scored, conn} = Client.command(conn, ["ZREVRANGE", "board", "0", "-1", "WITHSCORES"])
+    assert scored == ["c", "3.5", "b", "2", "a", "1"]
+
+    assert {{:error, "ERR syntax error"}, conn} =
+             Client.command(conn, ["ZREVRANGE", "board", "0", "-1", "WITHVALUES"])
+
+    assert {0, conn} = Client.command(conn, ["ZREVRANK", "board", "c"])
+    assert {2, conn} = Client.command(conn, ["ZREVRANK", "board", "a"])
+    assert {nil, conn} = Client.command(conn, ["ZREVRANK", "board", "ghost"])
+
+    {scores, conn} = Client.command(conn, ["ZMSCORE", "board", "a", "ghost", "c"])
+    assert scores == ["1", nil, "3.5"]
+
