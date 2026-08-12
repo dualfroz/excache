@@ -475,3 +475,74 @@ defmodule Excache.KeyspaceTest do
              Client.command(conn, ["OBJECT", "SIZE", "short"])
   end
 
+  test "wrong arity is reported per command", %{conn: conn} do
+    assert {{:error, "ERR wrong number of arguments for 'strlen' command"}, conn} =
+             Client.command(conn, ["STRLEN"])
+
+    assert {{:error, "ERR wrong number of arguments for 'lset' command"}, conn} =
+             Client.command(conn, ["LSET", "key"])
+
+    assert {{:error, "ERR wrong number of arguments for 'hmget' command"}, conn} =
+             Client.command(conn, ["HMGET", "key"])
+
+    assert {{:error, "ERR wrong number of arguments for 'copy' command"}, conn} =
+             Client.command(conn, ["COPY", "key"])
+
+    assert {{:error, "ERR wrong number of arguments for 'unlink' command"}, conn} =
+             Client.command(conn, ["UNLINK"])
+
+    assert {{:error, "ERR wrong number of arguments for 'expiretime' command"}, _conn} =
+             Client.command(conn, ["EXPIRETIME", "a", "b"])
+  end
+
+  test "wrong types and non integer arguments are rejected", %{conn: conn} do
+    assert {1, conn} = Client.command(conn, ["RPUSH", "listkey", "x"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "stringkey", "x"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} = Client.command(conn, ["STRLEN", "listkey"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["GETRANGE", "listkey", "0", "-1"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} = Client.command(conn, ["LPOS", "stringkey", "x"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["ZCOUNT", "stringkey", "-inf", "+inf"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["ZREVRANGE", "stringkey", "0", "-1"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["ZMSCORE", "stringkey", "a"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["LTRIM", "stringkey", "0", "-1"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} = Client.command(conn, ["SPOP", "stringkey"])
+
+    assert {{:error, "WRONGTYPE" <> _}, conn} =
+             Client.command(conn, ["SMISMEMBER", "stringkey", "a"])
+
+    assert {{:error, "ERR value is not an integer or out of range"}, conn} =
+             Client.command(conn, ["GETRANGE", "stringkey", "a", "1"])
+
+    assert {{:error, "ERR value is not an integer or out of range"}, conn} =
+             Client.command(conn, ["SETRANGE", "stringkey", "here", "v"])
+
+    assert {{:error, "ERR value is not an integer or out of range"}, _conn} =
+             Client.command(conn, ["SRANDMEMBER", "stringkey", "few"])
+  end
+
+  test "keyspace commands are queued and replayed inside MULTI", %{conn: conn} do
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "counter", "1"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["MULTI"])
+    assert {{:simple, "QUEUED"}, conn} = Client.command(conn, ["STRLEN", "counter"])
+    assert {{:simple, "QUEUED"}, conn} = Client.command(conn, ["COPY", "counter", "backup"])
+    assert {{:simple, "QUEUED"}, conn} = Client.command(conn, ["TOUCH", "counter", "backup"])
+
+    {replies, conn} = Client.command(conn, ["EXEC"])
+    assert replies == [1, 1, 2]
+
+    assert {"1", _conn} = Client.command(conn, ["GET", "backup"])
+  end
+end
