@@ -315,3 +315,163 @@ defmodule Excache.KeyspaceTest do
     {scores, conn} = Client.command(conn, ["ZMSCORE", "board", "a", "ghost", "c"])
     assert scores == ["1", nil, "3.5"]
 
+    {absent, _conn} = Client.command(conn, ["ZMSCORE", "nozset", "a"])
+    assert absent == [nil]
+  end
+
+  test "RENAME and RENAMENX", %{conn: conn} do
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "old", "payload"])
+    assert {1, conn} = Client.command(conn, ["EXPIRE", "old", "100"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["RENAME", "old", "fresh"])
+    assert {"payload", conn} = Client.command(conn, ["GET", "fresh"])
+    assert {0, conn} = Client.command(conn, ["EXISTS", "old"])
+
+    {ttl, conn} = Client.command(conn, ["TTL", "fresh"])
+    assert ttl > 0
+
+    assert {{:error, "ERR no such key"}, conn} = Client.command(conn, ["RENAME", "old", "other"])
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "taken", "t"])
+    assert {0, conn} = Client.command(conn, ["RENAMENX", "fresh", "taken"])
+    assert {"payload", conn} = Client.command(conn, ["GET", "fresh"])
+    assert {1, conn} = Client.command(conn, ["RENAMENX", "fresh", "free"])
+    assert {"payload", conn} = Client.command(conn, ["GET", "free"])
+
+    assert {{:error, "ERR no such key"}, _conn} = Client.command(conn, ["RENAMENX", "ghost", "x"])
+  end
+
+  test "COPY with REPLACE and DB", %{conn: conn} do
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "origin", "payload"])
+    assert {1, conn} = Client.command(conn, ["COPY", "origin", "clone"])
+    assert {"payload", conn} = Client.command(conn, ["GET", "clone"])
+    assert {0, conn} = Client.command(conn, ["COPY", "origin", "clone"])
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "origin", "changed"])
+    assert {1, conn} = Client.command(conn, ["COPY", "origin", "clone", "REPLACE"])
+    assert {"changed", conn} = Client.command(conn, ["GET", "clone"])
+
+    assert {1, conn} = Client.command(conn, ["COPY", "origin", "sameDb", "DB", "0"])
+    assert {"changed", conn} = Client.command(conn, ["GET", "sameDb"])
+
+    assert {{:error, "ERR DB index is out of range"}, conn} =
+             Client.command(conn, ["COPY", "origin", "elsewhere", "DB", "3"])
+
+    assert {{:error, "ERR source and destination objects are the same"}, conn} =
+             Client.command(conn, ["COPY", "origin", "origin"])
+
+    assert {0, conn} = Client.command(conn, ["COPY", "ghost", "anywhere"])
+
+    assert {{:error, "ERR syntax error"}, _conn} =
+             Client.command(conn, ["COPY", "origin", "clone", "FORCE"])
+  end
+
+  test "TOUCH and UNLINK count existing keys", %{conn: conn} do
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["MSET", "t1", "1", "t2", "2"])
+    assert {2, conn} = Client.command(conn, ["TOUCH", "t1", "t2", "t3"])
+    assert {2, conn} = Client.command(conn, ["UNLINK", "t1", "t2", "t3"])
+    assert {0, conn} = Client.command(conn, ["EXISTS", "t1"])
+    assert {0, _conn} = Client.command(conn, ["TOUCH", "t1"])
+  end
+
+  test "EXPIREAT, EXPIRETIME and PEXPIRETIME", %{conn: conn} do
+    future = System.system_time(:second) + 100
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "session", "v"])
+    assert {-1, conn} = Client.command(conn, ["EXPIRETIME", "session"])
+    assert {-1, conn} = Client.command(conn, ["PEXPIRETIME", "session"])
+    assert {-2, conn} = Client.command(conn, ["EXPIRETIME", "ghost"])
+    assert {-2, conn} = Client.command(conn, ["PEXPIRETIME", "ghost"])
+
+    assert {0, conn} = Client.command(conn, ["EXPIREAT", "ghost", Integer.to_string(future)])
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "session", Integer.to_string(future)])
+    assert {^future, conn} = Client.command(conn, ["EXPIRETIME", "session"])
+
+    {millis, conn} = Client.command(conn, ["PEXPIRETIME", "session"])
+    assert millis == future * 1000
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "doomed", "v"])
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "doomed", "1000"])
+    assert {0, conn} = Client.command(conn, ["EXISTS", "doomed"])
+
+    assert {{:error, "ERR value is not an integer or out of range"}, _conn} =
+             Client.command(conn, ["EXPIREAT", "session", "soon"])
+  end
+
+  test "EXPIREAT respects NX, XX, GT and LT", %{conn: conn} do
+    base = System.system_time(:second) + 100
+
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "lease", "v"])
+    assert {0, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "XX"])
+    assert {0, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "GT"])
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "NX"])
+    assert {^base, conn} = Client.command(conn, ["EXPIRETIME", "lease"])
+
+    assert {0, conn} =
+             Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base + 50), "NX"])
+
+    later = base + 50
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(later), "GT"])
+    assert {^later, conn} = Client.command(conn, ["EXPIRETIME", "lease"])
+
+    assert {0, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "GT"])
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "LT"])
+    assert {^base, conn} = Client.command(conn, ["EXPIRETIME", "lease"])
+    assert {1, conn} = Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(later), "XX"])
+
+    assert {{:error, "ERR NX and XX, GT or LT options at the same time are not compatible"}, conn} =
+             Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "NX", "XX"])
+
+    assert {{:error, "ERR Unsupported option SOON"}, _conn} =
+             Client.command(conn, ["EXPIREAT", "lease", Integer.to_string(base), "soon"])
+  end
+
+  test "OBJECT reports encoding, refcount, idletime and help", %{conn: conn} do
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "number", "12345"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "shared", "42"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "padded", "007"])
+    assert {{:simple, "OK"}, conn} = Client.command(conn, ["SET", "short", "hello"])
+
+    assert {{:simple, "OK"}, conn} =
+             Client.command(conn, ["SET", "long", String.duplicate("x", 60)])
+
+    assert {"int", conn} = Client.command(conn, ["OBJECT", "ENCODING", "number"])
+    assert {"embstr", conn} = Client.command(conn, ["OBJECT", "ENCODING", "padded"])
+    assert {"embstr", conn} = Client.command(conn, ["OBJECT", "ENCODING", "short"])
+    assert {"raw", conn} = Client.command(conn, ["OBJECT", "ENCODING", "long"])
+
+    assert {1, conn} = Client.command(conn, ["RPUSH", "smallList", "a"])
+    assert {"listpack", conn} = Client.command(conn, ["OBJECT", "ENCODING", "smallList"])
+
+    bigList = ["RPUSH", "bigList"] ++ Enum.map(1..200, &Integer.to_string/1)
+    assert {200, conn} = Client.command(conn, bigList)
+    assert {"quicklist", conn} = Client.command(conn, ["OBJECT", "ENCODING", "bigList"])
+
+    assert {2, conn} = Client.command(conn, ["SADD", "ints", "1", "2"])
+    assert {"intset", conn} = Client.command(conn, ["OBJECT", "ENCODING", "ints"])
+
+    assert {2, conn} = Client.command(conn, ["SADD", "words", "alpha", "beta"])
+    assert {"listpack", conn} = Client.command(conn, ["OBJECT", "ENCODING", "words"])
+
+    assert {1, conn} = Client.command(conn, ["HSET", "hash", "field", "value"])
+    assert {"listpack", conn} = Client.command(conn, ["OBJECT", "ENCODING", "hash"])
+
+    assert {1, conn} = Client.command(conn, ["ZADD", "zset", "1", "a"])
+    assert {"listpack", conn} = Client.command(conn, ["OBJECT", "ENCODING", "zset"])
+
+    assert {1, conn} = Client.command(conn, ["OBJECT", "REFCOUNT", "short"])
+    assert {2_147_483_647, conn} = Client.command(conn, ["OBJECT", "REFCOUNT", "shared"])
+    assert {0, conn} = Client.command(conn, ["OBJECT", "IDLETIME", "short"])
+
+    assert {{:error, "ERR no such key"}, conn} =
+             Client.command(conn, ["OBJECT", "ENCODING", "ghost"])
+
+    assert {{:error, "ERR no such key"}, conn} =
+             Client.command(conn, ["OBJECT", "REFCOUNT", "ghost"])
+
+    {help, conn} = Client.command(conn, ["OBJECT", "HELP"])
+    assert Enum.any?(help, &match?({:simple, "ENCODING <key>"}, &1))
+
+    assert {{:error, "ERR Unknown subcommand" <> _}, _conn} =
+             Client.command(conn, ["OBJECT", "SIZE", "short"])
+  end
+
