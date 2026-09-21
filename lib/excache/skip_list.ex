@@ -1,10 +1,6 @@
 defmodule Excache.SkipList do
   @moduledoc false
 
-  # Faithful port of the classic Redis zskiplist algorithm (t_zset.c):
-  # leveled forward pointers plus per-edge span counters so rank and
-  # positional range queries stay O(log n) instead of O(n).
-
   @max_level 32
   @probability 0.25
 

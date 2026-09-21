@@ -1,11 +1,6 @@
 defmodule Excache.Command.Introspection.Catalog do
   @moduledoc false
 
-  # {arity, flags, firstKey, lastKey, step, group}
-  # Arity counts the command name, negative means "at least this many".
-  # firstKey/lastKey/step are 1 based positions in the full argument vector,
-  # a negative lastKey counts back from the end, zeroes mean "takes no keys".
-
   @commands %{
     "PING" => {-1, [:fast], 0, 0, 0, :connection},
     "ECHO" => {2, [:fast], 0, 0, 0, :connection},

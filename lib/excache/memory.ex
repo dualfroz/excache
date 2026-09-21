@@ -1,25 +1,6 @@
 defmodule Excache.Memory do
   @moduledoc false
 
-  # Byte accounting for stored entries, the input every eviction policy needs.
-  #
-  # Structural cost comes from :erts_debug.size/1, which walks the term and
-  # counts machine words (shared subterms once). Two things it cannot see are
-  # added explicitly:
-  #
-  #   * reference counted binaries. ERTS keeps binaries up to 64 bytes on the
-  #     heap, so :erts_debug.size/1 covers those; anything larger lives
-  #     off-heap and only its ProcBin header is counted, so the payload is
-  #     added by walking the term.
-  #
-  #   * the per-row cost of living in an ETS set. Measured against
-  #     :ets.info(table, :memory) deltas on 64-bit OTP it is 41.24 bytes per
-  #     row above the flat term size: five words of hash bucket bookkeeping
-  #     plus an amortised bucket slot. Together with the five words of the
-  #     {key, kind, value, expiresAt} tuple itself (header plus four slots)
-  #     that is the ten word constant below; memory_test.exs asserts the
-  #     resulting estimate against a real ETS insert.
-
   alias Excache.SkipList
   alias Excache.Store
   alias Excache.Stream, as: CacheStream

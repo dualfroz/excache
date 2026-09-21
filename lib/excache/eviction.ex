@@ -1,20 +1,6 @@
 defmodule Excache.Eviction do
   @moduledoc false
 
-  # Redis style maxmemory policies over the Excache keyspace.
-  #
-  # Nothing here sorts the whole keyspace. Every pass draws maxmemory-samples
-  # random candidates, scores them under the active policy and merges them into
-  # a bounded pool that survives between passes, so a strong candidate seen in
-  # an earlier pass still wins against a weak fresh sample. The victim is the
-  # pool head; the loop repeats until the estimated usage drops under the limit
-  # or the candidate set runs dry.
-  #
-  # Both the clock and the sampling function are injectable, so a run is fully
-  # reproducible. The default keyspace adapter reads the whole store once per
-  # run and then accounts freed bytes incrementally, the same estimate driven
-  # approach Redis uses inside performEvictions.
-
   alias Excache.Eviction.Tracker
   alias Excache.Memory
   alias Excache.Store

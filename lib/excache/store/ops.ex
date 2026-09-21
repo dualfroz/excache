@@ -1,11 +1,6 @@
 defmodule Excache.Store.Ops do
   @moduledoc false
 
-  # Every operation runs inside the owning shard process, so ETS access is
-  # serialized per shard and read-modify-write sequences are atomic.
-  # Entry layout: {key, kind, value, expires_at} where kind is one of
-  # :string | :list | :hash | :set | :zset and expires_at is epoch ms or nil.
-
   alias Excache.SkipList
   alias Excache.Store.Ops.Helpers
 

@@ -1,15 +1,6 @@
 defmodule Excache.Eviction.Tracker do
   @moduledoc false
 
-  # Per key access metadata for the LRU and LFU policies.
-  #
-  # The LFU counter follows Redis evict.c: it starts at LFU_INIT_VAL, grows
-  # logarithmically so a key read a million times cannot bury one read a
-  # thousand times, and decays by one unit for every lfu-decay-time minutes a
-  # key goes untouched. Both knobs and the random source are injectable so the
-  # behaviour is reproducible in tests; every timestamp is epoch milliseconds
-  # supplied by the caller, the tracker never reads the clock itself.
-
   use GenServer
 
   @lfuInitCounter 5
