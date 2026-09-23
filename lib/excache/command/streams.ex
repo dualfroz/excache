@@ -203,10 +203,17 @@ defmodule Excache.Command.Streams do
     case parseGroupStart(startRaw) do
       {:ok, startSpec} ->
         case Store.xgroupCreate(key, group, startSpec, mkstream) do
-          {:ok, "OK"} -> reply({:simple, "OK"}, state)
-          {:error, :busygroup} -> reply({:error, "BUSYGROUP Consumer Group name already exists"}, state)
-          {:error, :nokey} -> reply({:error, noKeyGroupMessage()}, state)
-          {:error, reason} -> reply(streamError(reason), state)
+          {:ok, "OK"} ->
+            reply({:simple, "OK"}, state)
+
+          {:error, :busygroup} ->
+            reply({:error, "BUSYGROUP Consumer Group name already exists"}, state)
+
+          {:error, :nokey} ->
+            reply({:error, noKeyGroupMessage()}, state)
+
+          {:error, reason} ->
+            reply(streamError(reason), state)
         end
 
       :error ->
@@ -363,7 +370,9 @@ defmodule Excache.Command.Streams do
       _ ->
         case rest do
           [_ | _] = fields ->
-            if rem(length(fields), 2) == 0, do: {:ok, key, nomkstream, trim, token, fields}, else: :error
+            if rem(length(fields), 2) == 0,
+              do: {:ok, key, nomkstream, trim, token, fields},
+              else: :error
 
           [] ->
             :error
@@ -483,7 +492,6 @@ defmodule Excache.Command.Streams do
   defp splitStreams(tokens) do
     case Enum.split_while(tokens, &(String.upcase(&1) != "STREAMS")) do
       {leading, ["STREAMS" | rest]} ->
-        # any leading BLOCK ms is tolerated and ignored here
         _ = leading
         half = div(length(rest), 2)
 
@@ -747,8 +755,10 @@ defmodule Excache.Command.Streams do
   defp orZero({:error, _}), do: 0
 
   defp streamError(:wrongtype), do: Reply.wrongtype()
+
   defp streamError(:smaller),
-    do: {:error, "ERR The ID specified in XADD is equal or smaller than the target stream top item"}
+    do:
+      {:error, "ERR The ID specified in XADD is equal or smaller than the target stream top item"}
 
   defp streamError(:zero), do: {:error, "ERR The ID specified in XADD must be greater than 0-0"}
   defp streamError(other), do: {:error, "ERR #{other}"}

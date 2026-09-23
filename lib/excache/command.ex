@@ -80,6 +80,14 @@ defmodule Excache.Command do
     if oomDenied?(command) and Runner.admit() == :oom do
       {[@oom], state}
     else
+      gated(command, args, state)
+    end
+  end
+
+  defp gated(command, args, state) do
+    if writeCommand?(command) or command in @blockingNames do
+      Excache.WriteGate.pass(fn -> logged(command, args, state) end)
+    else
       logged(command, args, state)
     end
   end

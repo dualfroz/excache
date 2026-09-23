@@ -6,6 +6,7 @@ defmodule Excache.Application do
   @impl true
   def start(_type, _args) do
     port = Application.get_env(:excache, :port, 6379)
+    Excache.WriteGate.init()
 
     children = [
       {Registry, keys: :duplicate, name: Excache.PubSub.Registry},

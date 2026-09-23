@@ -7,10 +7,14 @@ defmodule Excache.Persistence do
   end
 
   def save do
-    path = snapshot_path()
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, :erlang.term_to_binary(Excache.Store.dump()))
-    :ok
+    Excache.WriteGate.exclusive(fn ->
+      path = snapshot_path()
+      pendingPath = path <> ".tmp"
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(pendingPath, :erlang.term_to_binary(Excache.Store.dump()), [:sync])
+      File.rename!(pendingPath, path)
+      Excache.Aof.truncate()
+    end)
   end
 
   def load_entries(path) do

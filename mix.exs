@@ -1,21 +1,27 @@
 defmodule Excache.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @sourceUrl "https://github.com/dualfroz/excache"
+
   def project do
     [
       app: :excache,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      description: "Redis-compatible in-memory data store server written in Elixir.",
+      package: package(),
+      name: "Excache",
+      source_url: @sourceUrl
     ]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_env), do: ["lib"]
 
-  # Run "mix help compile.app" to learn about applications.
   def application do
     [
       extra_applications: [:logger],
@@ -23,11 +29,15 @@ defmodule Excache.MixProject do
     ]
   end
 
-  # Run "mix help deps" to learn about dependencies.
   defp deps do
+    []
+  end
+
+  defp package do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      licenses: ["MIT"],
+      links: %{"GitHub" => @sourceUrl},
+      files: ~w(lib config mix.exs .formatter.exs README.md LICENSE)
     ]
   end
 end

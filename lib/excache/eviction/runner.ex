@@ -10,6 +10,7 @@ defmodule Excache.Eviction.Runner do
   alias Excache.Memory
   alias Excache.Notify
   alias Excache.Store
+  alias Excache.WriteGate
 
   @meter {__MODULE__, :meter}
   @used 1
@@ -166,8 +167,13 @@ defmodule Excache.Eviction.Runner do
     %{
       entries: fn -> entries end,
       delete: fn key ->
-        deleted = Store.del([key])
-        Aof.append("DEL", [key])
+        deleted =
+          WriteGate.pass(fn ->
+            deleted = Store.del([key])
+            Aof.append("DEL", [key])
+            deleted
+          end)
+
         Notify.key_event(key, "evicted")
         deleted
       end

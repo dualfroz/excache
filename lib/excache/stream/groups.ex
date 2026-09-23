@@ -306,8 +306,11 @@ defmodule Excache.Stream.Groups do
 
   defp removeFromConsumerMap(consumers, id, consumer) do
     case Map.fetch(consumers, consumer) do
-      {:ok, state} -> Map.put(consumers, consumer, %{state | pending: MapSet.delete(state.pending, id)})
-      :error -> consumers
+      {:ok, state} ->
+        Map.put(consumers, consumer, %{state | pending: MapSet.delete(state.pending, id)})
+
+      :error ->
+        consumers
     end
   end
 
@@ -326,7 +329,11 @@ defmodule Excache.Stream.Groups do
 
   defp touchConsumer(group, name, now) do
     state = Map.fetch!(group.consumers, name)
-    %{group | consumers: Map.put(group.consumers, name, %{state | seenTime: now, activeTime: now})}
+
+    %{
+      group
+      | consumers: Map.put(group.consumers, name, %{state | seenTime: now, activeTime: now})
+    }
   end
 
   defp takeCount(list, nil), do: list
